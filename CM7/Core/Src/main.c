@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "fatfs.h"
 #include "lwip.h"
 
@@ -52,13 +53,21 @@
 //data cache invalidation causes hardfault (datacache off in this project)
 
 
+//FREERTOS
+//Adjust heap and minimal stack size, default is way to small
+
 
 #include "mt48lc4m32b2.h"
 #include "rk043fn48h.h"
 #include "emmcDrv.h"
-#include "console.h"
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "bsp.h"
+#include "gfFont.h"
+#include "gfBitmap.h"
+#include "gfDrawing.h"
+#include "osAlloc.h"
 
 /* USER CODE END Includes */
 
@@ -93,6 +102,13 @@ UART_HandleTypeDef huart3;
 
 SDRAM_HandleTypeDef hsdram2;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 8192 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -105,6 +121,8 @@ static void MX_USART3_UART_Init(void);
 static void MX_FMC_Init(void);
 static void MX_SDMMC1_MMC_Init(void);
 static void MX_RNG_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -120,9 +138,10 @@ uint8_t     workBuffer[_MAX_SS];
 FATFS       fatFs;
 FIL         fil;
 
-console_t   con;
-uint8_t     conTextBuffer[ 60 * 34 * 2 ];
-uint8_t     conReady = 0;
+uint32_t                conReady = 0;
+extern tgfTextOverlay   con;
+tgfBitmap               screen;
+
 
 //override putchar -> printf redirected to uart
 
@@ -134,12 +153,15 @@ int __io_putchar( int ch )
 
    if( conReady )
    {
-      buf[0] = (uint8_t)ch;
-      buf[1] = 0;
 
-      conPrint( &con, buf );
+      if( ch != '\r' )
+      {
+         buf[0] = (uint8_t)ch;
+         buf[1] = 0;
+
+         toPrint( &con, buf );
+      }
    }
-
    return ch;
 }
 
@@ -153,11 +175,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-   uint32_t  i;
-   FRESULT   res;
-   uint16_t *sdramPtr = (uint16_t*) 0xd0000000;
-   UINT      bw;
-
+  FRESULT   res;
   /* USER CODE END 1 */
 /* USER CODE BEGIN Boot_Mode_Sequence_0 */
    int32_t  timeout;
@@ -220,20 +238,7 @@ int main(void)
   MX_SDMMC1_MMC_Init();
   MX_FATFS_Init();
   MX_RNG_Init();
-  MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
-
-  //init lcd console
-
-  con.frameBuffer    = (uint16_t*) 0xd0000000;
-  con.fbWidth        = 480;
-  con.fbHeight       = 272;
-  con.fbRowWidth     = 480;
-
-  con.width          = 60;
-  con.height         = 34;
-  con.textAttributes = 0x0f;
-  con.textBuffer     = conTextBuffer;
 
 
   //init emmc driver
@@ -246,23 +251,13 @@ int main(void)
   FATFS_LinkDriver( &emmcDriverStruct, emmcPath );
 
 
-  for( i = 0; i < 130560 ; i++ )
-  {
-     sdramPtr[i] = 0;
-  }
-
-  conCls( &con );
-  conReady = 1;
-
-
-  printf( "h745 gfxLib B20250124\r\n\r\n" );
 
 
   printf( "emmcPath: '%s'\r\n", emmcPath );
 
   res = f_mount( &fatFs, (TCHAR const*)emmcPath, 0 );
 
-  res = f_open( &fil, "0:test.txt", FA_READ );
+/*  res = f_open( &fil, "0:test.txt", FA_READ );
 
   bw = 0;
 
@@ -274,6 +269,7 @@ int main(void)
   printf( "|%s|\r\n", workBuffer );
 
   conRedraw( &con );
+*/
 
   /*res = f_mkfs(emmcPath, FS_FAT32, 0, workBuffer, sizeof(workBuffer));
 
@@ -286,6 +282,42 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -294,20 +326,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-     MX_LWIP_Process();
 
-     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-
-     HAL_Delay( 500 );
-
-     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-
-     HAL_Delay( 500 );
-
-     printf( "*" );
-
-     fflush( stdout );
-     conRedraw( &con );
 
   }
   /* USER CODE END 3 */
@@ -709,6 +728,87 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* init code for LWIP */
+  MX_LWIP_Init();
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+
+  uint32_t     i;
+
+  bspInit();
+
+  conReady = 1;
+
+  screen.width    = 480;
+  screen.height   = 272;
+  screen.flags    = 0;
+  screen.rowWidth = 480;
+  screen.buffer   = osAlloc( screen.rowWidth * screen.height * 2, OS_ALLOC_MEMF_CHIP );
+
+  gfDisplayBitmap( &screen );
+
+  gfFillRect( &screen, 0, 0, screen.width - 1, screen.height - 1, gfColor( 0, 0, 0 ) );
+
+  for( i = 0; i < 255; i++ )
+  {
+     gfCircle( &screen, screen.width / 2, screen.height / 2, i + 1, gfColor( ( 255 - i ), ( 255 - i ), ( 255 - i ) ) );
+  }
+
+  printf( "h745 gfxLib B20250124\r\n\r\n" );
+
+  gfDrawTextOverlay( &screen, &con, 0, 0 );
+
+  for(;;)
+  {
+     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+     osDelay( 500 );
+
+     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+
+     osDelay( 500 );
+
+     printf( "*" );
+
+     fflush( stdout );
+
+     gfDrawTextOverlay( &screen, &con, 0, 0 );
+
+     //     conRedraw( &con );
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2) {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
